@@ -13,3 +13,12 @@
 .externalNativeBuild
 .cxx
 local.properties
+*.jks
+*.keystore
+*.apk
+*.aab
+*.dex
+*.log
+*.hprof
+.DS_Store
+Thumbs.db
