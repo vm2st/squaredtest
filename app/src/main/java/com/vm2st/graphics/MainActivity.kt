@@ -1,6 +1,7 @@
 package com.vm2st.graphics
 
 import android.annotation.SuppressLint
+import android.annotation.TargetApi
 import android.app.Activity
 import android.app.ActivityManager
 import android.content.Context
@@ -17,6 +18,7 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.widget.*
+import android.window.OnBackInvokedDispatcher
 import androidx.core.graphics.toColorInt
 import androidx.core.graphics.withRotation
 import java.io.File
@@ -67,7 +69,7 @@ class MainActivity : Activity() {
     private var currentScreen = AppScreen.MAIN
     private var frames = 0
     private var lastFpsTime = 0L
-    private var backPressedTime: Long = 0 // Для двойного нажатия "Назад"
+    private var backPressedTime: Long = 0
 
     // Колбэк для подсчета FPS
     private val frameCallback = object : Choreographer.FrameCallback {
@@ -89,14 +91,12 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Корневой слой с системными отступами
         rootLayout = FrameLayout(this).apply {
             setBackgroundColor(Color.DKGRAY)
             fitsSystemWindows = true
         }
         contentLayout = FrameLayout(this)
 
-        // Оверлей со счетчиками
         overlayLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(16, 16, 16, 16)
@@ -134,6 +134,11 @@ class MainActivity : Activity() {
 
         lastFpsTime = System.currentTimeMillis()
         Choreographer.getInstance().postFrameCallback(frameCallback)
+
+        // Инициализация современной системы "Назад" для Android 13+ (API 33+)
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerModernBackHandler()
+        }
     }
 
     override fun onDestroy() {
@@ -141,16 +146,35 @@ class MainActivity : Activity() {
         Choreographer.getInstance().removeFrameCallback(frameCallback)
     }
 
-    // --- ОБРАБОТКА КНОПКИ НАЗАД ---
+    // --- НОВАЯ СИСТЕМА ОБРАБОТКИ "НАЗАД" ---
+
+    // Для Android 13+ (API 33 и новее, включая Android 16)
+    @TargetApi(33)
+    private fun registerModernBackHandler() {
+        onBackInvokedDispatcher.registerOnBackInvokedCallback(
+            OnBackInvokedDispatcher.PRIORITY_DEFAULT
+        ) {
+            handleBackAction()
+        }
+    }
+
+    // Для старых устройств (до API 33)
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
+        if (Build.VERSION.SDK_INT < 33) {
+            handleBackAction()
+        } else {
+            super.onBackPressed() // На новых устройствах это перехватывается диспетчером
+        }
+    }
+
+    // Единая логика возврата
+    private fun handleBackAction() {
         if (currentScreen != AppScreen.MAIN) {
-            // Если в тесте — возвращаемся в меню
             switchScreen(AppScreen.MAIN)
         } else {
-            // Если в главном меню — проверяем время двойного клика (2 секунды)
             if (System.currentTimeMillis() - backPressedTime < 2000) {
-                super.onBackPressed() // Закрывает приложение
+                finish() // Закрываем приложение
             } else {
                 backPressedTime = System.currentTimeMillis()
                 Toast.makeText(this, Loc.pressBackAgain, Toast.LENGTH_SHORT).show()
@@ -483,7 +507,6 @@ class Cube {
     private val mProgram: Int
 
     private val cubeCoords = floatArrayOf(
-        // Front face (Нормаль: Z = 1)
         -1f, -1f,  1f,   0f, 0f, 1f,
         1f, -1f,  1f,   0f, 0f, 1f,
         1f,  1f,  1f,   0f, 0f, 1f,
@@ -491,7 +514,6 @@ class Cube {
         1f,  1f,  1f,   0f, 0f, 1f,
         -1f,  1f,  1f,   0f, 0f, 1f,
 
-        // Right face (Нормаль: X = 1)
         1f, -1f,  1f,   1f, 0f, 0f,
         1f, -1f, -1f,   1f, 0f, 0f,
         1f,  1f, -1f,   1f, 0f, 0f,
@@ -499,7 +521,6 @@ class Cube {
         1f,  1f, -1f,   1f, 0f, 0f,
         1f,  1f,  1f,   1f, 0f, 0f,
 
-        // Back face (Нормаль: Z = -1)
         1f, -1f, -1f,   0f, 0f, -1f,
         -1f, -1f, -1f,   0f, 0f, -1f,
         -1f,  1f, -1f,   0f, 0f, -1f,
@@ -507,7 +528,6 @@ class Cube {
         -1f,  1f, -1f,   0f, 0f, -1f,
         1f,  1f, -1f,   0f, 0f, -1f,
 
-        // Left face (Нормаль: X = -1)
         -1f, -1f, -1f,  -1f, 0f, 0f,
         -1f, -1f,  1f,  -1f, 0f, 0f,
         -1f,  1f,  1f,  -1f, 0f, 0f,
@@ -515,7 +535,6 @@ class Cube {
         -1f,  1f,  1f,  -1f, 0f, 0f,
         -1f,  1f, -1f,  -1f, 0f, 0f,
 
-        // Top face (Нормаль: Y = 1)
         -1f,  1f,  1f,   0f, 1f, 0f,
         1f,  1f,  1f,   0f, 1f, 0f,
         1f,  1f, -1f,   0f, 1f, 0f,
@@ -523,7 +542,6 @@ class Cube {
         1f,  1f, -1f,   0f, 1f, 0f,
         -1f,  1f, -1f,   0f, 1f, 0f,
 
-        // Bottom face (Нормаль: Y = -1)
         -1f, -1f, -1f,   0f, -1f, 0f,
         1f, -1f, -1f,   0f, -1f, 0f,
         1f, -1f,  1f,   0f, -1f, 0f,
