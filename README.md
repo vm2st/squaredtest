@@ -4,5 +4,5 @@ This is an android program for testing 2D and 3D graphics on your device! Это
 
 
 
-Подробнее тут: https://t.me/vm2\_studios/347
+Подробнее тут: https://t.me/vm2_studios/347
 
