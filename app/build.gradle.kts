@@ -5,14 +5,14 @@ plugins {
 
 android {
     namespace = "com.vm2st.graphics"
-    compileSdk = 36 // Актуальный SDK для современных сборок
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.vm2st.graphics"
         minSdk = 19
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1"
     }
 
     compileOptions {
