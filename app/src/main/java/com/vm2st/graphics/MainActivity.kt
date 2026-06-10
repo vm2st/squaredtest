@@ -8,6 +8,7 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.RectF
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
@@ -15,21 +16,25 @@ import android.os.Build
 import android.os.Bundle
 import android.view.Choreographer
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.MotionEvent
+import android.view.SurfaceHolder
+import android.view.SurfaceView
 import android.view.View
 import android.widget.*
 import android.window.OnBackInvokedDispatcher
+import androidx.annotation.RequiresApi
 import androidx.core.graphics.toColorInt
-import androidx.core.graphics.withRotation
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.Locale
-import javax.microedition.khronos.egl.EGLConfig
-import javax.microedition.khronos.opengles.GL10
 import kotlin.math.cos
 import kotlin.math.sin
+import kotlin.random.Random
+import javax.microedition.khronos.egl.EGLConfig
+import javax.microedition.khronos.opengles.GL10
 
 // --- ЛОКАЛИЗАЦИЯ ---
 object Loc {
@@ -42,19 +47,30 @@ object Loc {
     val noAccess get() = if (isRu) "Нет доступа" else "No access"
     val sysInfo get() = if (isRu) "ИНФОРМАЦИЯ О СИСТЕМЕ" else "SYSTEM INFORMATION"
     val processor get() = if (isRu) "Процессор: " else "Processor: "
+    val gpu get() = if (isRu) "Видеокарта: " else "GPU: "
     val freq get() = if (isRu) "Частота ЦП: " else "CPU Freq: "
+    val gpuFreq get() = if (isRu) "Частота GPU: " else "GPU Freq: "
     val ram get() = if (isRu) "Объем ОЗУ: " else "RAM Size: "
-    val test2d get() = if (isRu) "ТЕСТ 2D-ГРАФИКИ" else "2D GRAPHICS TEST"
-    val test3d get() = if (isRu) "ТЕСТ 3D-ГРАФИКИ" else "3D GRAPHICS TEST"
+
+    val cat2d get() = if (isRu) "2D-ГРАФИКА" else "2D GRAPHICS"
+    val cat3d get() = if (isRu) "3D-ГРАФИКА" else "3D GRAPHICS"
+
+    val test2dLight get() = if (isRu) "ЛЕГКИЙ ТЕСТ" else "LIGHT TEST"
+    val test2dHeavy get() = if (isRu) "ЭКСТРИМ ТЕСТ" else "EXTREME TEST"
+    val test3d get() = if (isRu) "OPENGL ES 2.0" else "OPENGL ES 2.0"
+
     val load2d get() = if (isRu) "Нагрузка 2D: " else "2D Load: "
-    val color3d get() = if (isRu) "Цвет 3D куба" else "3D Cube Color"
+    val load3d get() = if (isRu) "Нагрузка 3D (Кубы): " else "3D Load (Cubes): "
+    val color3d get() = if (isRu) "Цвет 3D кубов" else "3D Cubes Color"
     val gb get() = if (isRu) "ГБ" else "GB"
     val ghz get() = if (isRu) "ГГц" else "GHz"
     val pressBackAgain get() = if (isRu) "Нажмите НАЗАД еще раз для выхода" else "Press BACK again to exit"
 }
 
 // --- СОСТОЯНИЯ ЭКРАНОВ ---
-enum class AppScreen { MAIN, TEST_2D, TEST_3D_GL }
+enum class AppScreen { MAIN, TEST_2D_LIGHT, TEST_2D_HEAVY, TEST_3D_GL }
+
+data class RenderParams(val rotX: Float, val rotY: Float, val hue: Float, val load: Float)
 
 @SuppressLint("SetTextI18n", "ClickableViewAccessibility")
 class MainActivity : Activity() {
@@ -67,22 +83,22 @@ class MainActivity : Activity() {
     private lateinit var backButton: Button
 
     private var currentScreen = AppScreen.MAIN
-    private var frames = 0
-    private var lastFpsTime = 0L
+    private var uiFrames = 0
+    private var lastUiFpsTime = 0L
     private var backPressedTime: Long = 0
 
-    // Колбэк для подсчета FPS
+    private var cachedGpuModel: String? = null
+
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
-            frames++
-            val now = System.currentTimeMillis()
-            if (now - lastFpsTime >= 1000) {
-                fpsText.text = "${Loc.fps}: $frames"
-                val temp = getCpuTemp()
-                tempText.visibility = if (temp > 0f) View.VISIBLE else View.GONE
-                tempText.text = "${Loc.cpu}: ${temp}°C"
-                frames = 0
-                lastFpsTime = now
+            if (currentScreen == AppScreen.MAIN) {
+                uiFrames++
+                val now = System.currentTimeMillis()
+                if (now - lastUiFpsTime >= 1000) {
+                    updateFpsDisplay(uiFrames)
+                    uiFrames = 0
+                    lastUiFpsTime = now
+                }
             }
             Choreographer.getInstance().postFrameCallback(this)
         }
@@ -132,10 +148,9 @@ class MainActivity : Activity() {
         setContentView(rootLayout)
         switchScreen(AppScreen.MAIN)
 
-        lastFpsTime = System.currentTimeMillis()
+        lastUiFpsTime = System.currentTimeMillis()
         Choreographer.getInstance().postFrameCallback(frameCallback)
 
-        // Инициализация современной системы "Назад" для Android 13+ (API 33+)
         if (Build.VERSION.SDK_INT >= 33) {
             registerModernBackHandler()
         }
@@ -146,10 +161,16 @@ class MainActivity : Activity() {
         Choreographer.getInstance().removeFrameCallback(frameCallback)
     }
 
-    // --- НОВАЯ СИСТЕМА ОБРАБОТКИ "НАЗАД" ---
+    fun updateFpsDisplay(fps: Int) {
+        runOnUiThread {
+            fpsText.text = "${Loc.fps}: $fps"
+            val temp = getCpuTemp()
+            tempText.visibility = if (temp > 0f) View.VISIBLE else View.GONE
+            tempText.text = "${Loc.cpu}: ${temp}°C"
+        }
+    }
 
-    // Для Android 13+ (API 33 и новее, включая Android 16)
-    @TargetApi(33)
+    @RequiresApi(33)
     private fun registerModernBackHandler() {
         onBackInvokedDispatcher.registerOnBackInvokedCallback(
             OnBackInvokedDispatcher.PRIORITY_DEFAULT
@@ -158,23 +179,20 @@ class MainActivity : Activity() {
         }
     }
 
-    // Для старых устройств (до API 33)
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (Build.VERSION.SDK_INT < 33) {
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_BACK && Build.VERSION.SDK_INT < 33) {
             handleBackAction()
-        } else {
-            super.onBackPressed() // На новых устройствах это перехватывается диспетчером
+            return true
         }
+        return super.onKeyDown(keyCode, event)
     }
 
-    // Единая логика возврата
     private fun handleBackAction() {
         if (currentScreen != AppScreen.MAIN) {
             switchScreen(AppScreen.MAIN)
         } else {
             if (System.currentTimeMillis() - backPressedTime < 2000) {
-                finish() // Закрываем приложение
+                finish()
             } else {
                 backPressedTime = System.currentTimeMillis()
                 Toast.makeText(this, Loc.pressBackAgain, Toast.LENGTH_SHORT).show()
@@ -188,13 +206,17 @@ class MainActivity : Activity() {
         backButton.visibility = if (screen == AppScreen.MAIN) View.GONE else View.VISIBLE
 
         when (screen) {
-            AppScreen.MAIN -> showMainMenu()
-            AppScreen.TEST_2D -> show2DTest()
+            AppScreen.MAIN -> {
+                uiFrames = 0
+                lastUiFpsTime = System.currentTimeMillis()
+                showMainMenu()
+            }
+            AppScreen.TEST_2D_LIGHT -> show2DTest(isHeavy = false)
+            AppScreen.TEST_2D_HEAVY -> show2DTest(isHeavy = true)
             AppScreen.TEST_3D_GL -> show3DGLTest()
         }
     }
 
-    // --- УТИЛИТЫ СИСТЕМЫ ---
     private fun getDeviceRam(): String {
         val actManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val memInfo = ActivityManager.MemoryInfo()
@@ -212,6 +234,48 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun getGpuModel(): String {
+        if (cachedGpuModel != null) return cachedGpuModel!!
+        return try {
+            val display = android.opengl.EGL14.eglGetDisplay(android.opengl.EGL14.EGL_DEFAULT_DISPLAY)
+            val version = IntArray(2)
+            android.opengl.EGL14.eglInitialize(display, version, 0, version, 1)
+
+            val configAttribs = intArrayOf(
+                android.opengl.EGL14.EGL_RENDERABLE_TYPE, android.opengl.EGL14.EGL_OPENGL_ES2_BIT,
+                android.opengl.EGL14.EGL_NONE
+            )
+            val configs = arrayOfNulls<android.opengl.EGLConfig>(1)
+            val numConfigs = IntArray(1)
+            android.opengl.EGL14.eglChooseConfig(display, configAttribs, 0, configs, 0, 1, numConfigs, 0)
+
+            val config = configs[0]
+            val contextAttribs = intArrayOf(
+                android.opengl.EGL14.EGL_CONTEXT_CLIENT_VERSION, 2,
+                android.opengl.EGL14.EGL_NONE
+            )
+            val eglContext = android.opengl.EGL14.eglCreateContext(display, config, android.opengl.EGL14.EGL_NO_CONTEXT, contextAttribs, 0)
+
+            val surfaceAttribs = intArrayOf(android.opengl.EGL14.EGL_WIDTH, 1, android.opengl.EGL14.EGL_HEIGHT, 1, android.opengl.EGL14.EGL_NONE)
+            val eglSurface = android.opengl.EGL14.eglCreatePbufferSurface(display, config, surfaceAttribs, 0)
+
+            android.opengl.EGL14.eglMakeCurrent(display, eglSurface, eglSurface, eglContext)
+
+            val renderer = android.opengl.GLES20.glGetString(android.opengl.GLES20.GL_RENDERER)
+
+            android.opengl.EGL14.eglMakeCurrent(display, android.opengl.EGL14.EGL_NO_SURFACE, android.opengl.EGL14.EGL_NO_SURFACE, android.opengl.EGL14.EGL_NO_CONTEXT)
+            android.opengl.EGL14.eglDestroySurface(display, eglSurface)
+            android.opengl.EGL14.eglDestroyContext(display, eglContext)
+            android.opengl.EGL14.eglTerminate(display)
+
+            cachedGpuModel = renderer ?: Loc.noAccess
+            cachedGpuModel!!
+        } catch (e: Exception) {
+            cachedGpuModel = Loc.noAccess
+            cachedGpuModel!!
+        }
+    }
+
     private fun getCpuFrequency(): String {
         return try {
             var maxFreqKHz = 0L
@@ -226,15 +290,52 @@ class MainActivity : Activity() {
                     }
                 }
             }
-
-            if (maxFreqKHz > 0L) {
-                "%.2f ${Loc.ghz}".format(maxFreqKHz / 1000000.0)
-            } else {
-                Loc.noAccess
-            }
+            if (maxFreqKHz > 0L) "%.2f ${Loc.ghz}".format(maxFreqKHz / 1000000.0) else Loc.noAccess
         } catch (_: Exception) {
             Loc.noAccess
         }
+    }
+
+    // Универсальный метод поиска частоты GPU (Adreno & Mali)
+    private fun getGpuFrequency(): String {
+        try {
+            val paths = listOf(
+                "/sys/class/kgsl/kgsl-3d0/max_gpuclk",
+                "/sys/class/kgsl/kgsl-3d0/gpuclk"
+            )
+            var maxFreqHz = 0L
+
+            for (path in paths) {
+                val file = File(path)
+                if (file.exists()) {
+                    val freq = file.readText().trim().toLongOrNull() ?: 0L
+                    if (freq > maxFreqHz) maxFreqHz = freq
+                }
+            }
+
+            val devfreqDir = File("/sys/class/devfreq")
+            if (devfreqDir.exists()) {
+                devfreqDir.listFiles()?.forEach { dir ->
+                    val name = dir.name.lowercase(Locale.US)
+                    if (name.contains("mali") || name.contains("gpu") || name.contains("kgsl")) {
+                        listOf("max_freq", "cur_freq").forEach { fileName ->
+                            val file = File(dir, fileName)
+                            if (file.exists()) {
+                                val freq = file.readText().trim().toLongOrNull() ?: 0L
+                                if (freq > maxFreqHz) maxFreqHz = freq
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (maxFreqHz > 0L) {
+                if (maxFreqHz < 10000) maxFreqHz *= 1000000L
+                else if (maxFreqHz < 10000000) maxFreqHz *= 1000L
+                return "%.2f ${Loc.ghz}".format(maxFreqHz / 1000000000.0)
+            }
+        } catch (_: Exception) {}
+        return Loc.noAccess
     }
 
     private fun getCpuTemp(): Float {
@@ -246,7 +347,6 @@ class MainActivity : Activity() {
         }
     }
 
-    // --- ЭКРАНЫ ---
     private fun showMainMenu() {
         val menuLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -259,38 +359,67 @@ class MainActivity : Activity() {
             setBackgroundColor("#88000000".toColorInt())
             setPadding(32, 32, 32, 32)
         }
-
         infoCard.addView(TextView(this).apply { text = Loc.sysInfo; setTextColor(Color.LTGRAY); textSize = 12f; setPadding(0, 0, 0, 16) })
         infoCard.addView(TextView(this).apply { text = "${Loc.processor}${getCpuModel()}"; setTextColor(Color.WHITE); textSize = 16f })
+        infoCard.addView(TextView(this).apply { text = "${Loc.gpu}${getGpuModel()}"; setTextColor(Color.WHITE); textSize = 16f })
         infoCard.addView(TextView(this).apply { text = "${Loc.freq}${getCpuFrequency()}"; setTextColor(Color.WHITE); textSize = 16f })
+        infoCard.addView(TextView(this).apply { text = "${Loc.gpuFreq}${getGpuFrequency()}"; setTextColor(Color.WHITE); textSize = 16f })
         infoCard.addView(TextView(this).apply { text = "${Loc.ram}${getDeviceRam()}"; setTextColor(Color.WHITE); textSize = 16f })
+        menuLayout.addView(infoCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 64 })
 
-        val btn2D = Button(this).apply {
-            text = Loc.test2d
-            setBackgroundColor("#1E88E5".toColorInt())
-            setTextColor(Color.WHITE)
-            setOnClickListener { switchScreen(AppScreen.TEST_2D) }
+        menuLayout.addView(TextView(this).apply {
+            text = Loc.cat2d
+            setTextColor(Color.LTGRAY)
+            textSize = 14f
+            setPadding(0, 0, 0, 8)
+        })
+
+        val row2D = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            weightSum = 2f
         }
+        val btn2DLight = Button(this).apply {
+            text = Loc.test2dLight
+            setBackgroundColor("#42A5F5".toColorInt())
+            setTextColor(Color.WHITE)
+            setOnClickListener { switchScreen(AppScreen.TEST_2D_LIGHT) }
+        }
+        val btn2DHeavy = Button(this).apply {
+            text = Loc.test2dHeavy
+            setBackgroundColor("#EF5350".toColorInt())
+            setTextColor(Color.WHITE)
+            setOnClickListener { switchScreen(AppScreen.TEST_2D_HEAVY) }
+        }
+
+        row2D.addView(btn2DLight, LinearLayout.LayoutParams(0, 150, 1f).apply { rightMargin = 8 })
+        row2D.addView(btn2DHeavy, LinearLayout.LayoutParams(0, 150, 1f).apply { leftMargin = 8 })
+        menuLayout.addView(row2D, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 48 })
+
+        menuLayout.addView(TextView(this).apply {
+            text = Loc.cat3d
+            setTextColor(Color.LTGRAY)
+            textSize = 14f
+            setPadding(0, 0, 0, 8)
+        })
 
         val btn3D = Button(this).apply {
             text = Loc.test3d
-            setBackgroundColor("#43A047".toColorInt())
+            setBackgroundColor("#66BB6A".toColorInt())
             setTextColor(Color.WHITE)
             setOnClickListener { switchScreen(AppScreen.TEST_3D_GL) }
         }
-
-        menuLayout.addView(infoCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 64 })
-        menuLayout.addView(btn2D, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 150).apply { bottomMargin = 16 })
         menuLayout.addView(btn3D, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 150))
 
         contentLayout.addView(menuLayout, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
     }
 
-    private fun show2DTest() {
+    private fun show2DTest(isHeavy: Boolean) {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         var loadPercent = 1f
-        val testView = Test2DView(this).apply {
+        val testView = Test2DSurfaceView(this, isHeavy) { realFps ->
+            updateFpsDisplay(realFps)
+        }.apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
 
@@ -325,6 +454,7 @@ class MainActivity : Activity() {
     private fun show3DGLTest() {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         var colorHue = 0f
+        var loadPercent = 1f
         var rotX = 0f
         var rotY = 0f
         var lastTouchX = 0f
@@ -332,7 +462,9 @@ class MainActivity : Activity() {
 
         val glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
-            setRenderer(MyGLRenderer { rotX to rotY to colorHue })
+            setRenderer(MyGLRenderer({ RenderParams(rotX, rotY, colorHue, loadPercent) }) { realFps ->
+                updateFpsDisplay(realFps)
+            })
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
 
@@ -362,7 +494,7 @@ class MainActivity : Activity() {
         }
 
         val colorText = TextView(this).apply { text = Loc.color3d; setTextColor(Color.WHITE) }
-        val seekBar = SeekBar(this).apply {
+        val colorSeekBar = SeekBar(this).apply {
             max = 360
             progress = 0
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
@@ -374,95 +506,229 @@ class MainActivity : Activity() {
             })
         }
 
+        val loadText = TextView(this).apply { text = "${Loc.load3d}${loadPercent.toInt()}%"; setTextColor(Color.WHITE); setPadding(0, 16, 0, 0) }
+        val loadSeekBar = SeekBar(this).apply {
+            max = 99
+            progress = 0
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    loadPercent = progress + 1f
+                    loadText.text = "${Loc.load3d}${loadPercent.toInt()}%"
+                }
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+            })
+        }
+
         controlPanel.addView(colorText)
-        controlPanel.addView(seekBar)
+        controlPanel.addView(colorSeekBar)
+        controlPanel.addView(loadText)
+        controlPanel.addView(loadSeekBar)
+
         container.addView(glView)
         container.addView(controlPanel)
         contentLayout.addView(container)
     }
 }
 
-// --- КЛАСС ДЛЯ 2D РЕНДЕРА ---
-class Test2DView(context: Context) : View(context) {
-    private val paint = Paint().apply { isAntiAlias = true }
+// --- УНИВЕРСАЛЬНЫЙ ДВИЖОК 2D РЕНДЕРА (С НЕЛИНЕЙНОЙ НАГРУЗКОЙ) ---
+class Test2DSurfaceView(
+    context: Context,
+    private val isHeavy: Boolean,
+    private val onFpsUpdate: (Int) -> Unit
+) : SurfaceView(context), SurfaceHolder.Callback {
+
+    private var renderThread: Thread? = null
+    @Volatile private var isRunning = false
+
+    private val paint = Paint().apply {
+        isAntiAlias = true
+        if (isHeavy) setShadowLayer(25f, 0f, 0f, Color.RED)
+    }
+
+    private val rect = RectF()
     private var time = 0f
     private var currentLoadPercent = 1f
-    private val maxObjects = 50000
+
+    private val maxObjects = if (isHeavy) 40000 else 50000
+
+    private var frames = 0
+    private var lastTime = System.currentTimeMillis()
+
+    init {
+        holder.addCallback(this)
+    }
 
     fun setLoad(percent: Float) {
         currentLoadPercent = percent
     }
 
-    override fun onDraw(canvas: Canvas) {
-        super.onDraw(canvas)
-        time += 0.05f
+    override fun surfaceCreated(holder: SurfaceHolder) {
+        isRunning = true
+        renderThread = Thread {
+            while (isRunning) {
+                val canvas = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    holder.lockHardwareCanvas()
+                } else {
+                    holder.lockCanvas()
+                }
 
-        val w = width.toFloat()
-        val h = height.toFloat()
-        val currentObjects = ((currentLoadPercent / 100f) * maxObjects).toInt()
+                if (canvas != null) {
+                    try {
+                        canvas.drawColor(Color.DKGRAY)
+                        time += 0.05f
 
-        for (i in 0 until currentObjects) {
-            val x = sin(time + i) * w / 2 + w / 2
-            val y = cos(time * 0.8f + i) * h / 2 + h / 2
-            val objSize = 20f + (i % 30f)
+                        val w = width.toFloat()
+                        val h = height.toFloat()
 
-            paint.setARGB(200, i % 255, (i * 2) % 255, (i * 3) % 255)
+                        val loadNorm = currentLoadPercent / 100f
+                        val curvedLoad = loadNorm * loadNorm * loadNorm
+                        val currentObjects = (curvedLoad * maxObjects).toInt().coerceAtLeast(1)
 
-            canvas.withRotation(degrees = time * 50f + i, pivotX = x, pivotY = y) {
-                drawRect(x, y, x + objSize, y + objSize, paint)
+                        for (i in 0 until currentObjects) {
+                            if (isHeavy) {
+                                val x = sin(time + i * 0.001f) * w / 2 + w / 2
+                                val y = cos(time * 0.8f + i * 0.001f) * h / 2 + h / 2
+                                val objSize = 10f + (i % 40f)
+
+                                paint.setARGB(150, i % 255, (i * 2) % 255, (i * 3) % 255)
+
+                                canvas.save()
+                                canvas.rotate(time * 50f + (i % 360), x, y)
+                                rect.set(x, y, x + objSize, y + objSize * 1.5f)
+                                canvas.drawOval(rect, paint)
+                                canvas.restore()
+                            } else {
+                                val x = sin(time + i) * w / 2 + w / 2
+                                val y = cos(time * 0.8f + i) * h / 2 + h / 2
+                                val objSize = 20f + (i % 30f)
+
+                                paint.setARGB(200, i % 255, (i * 2) % 255, (i * 3) % 255)
+
+                                canvas.save()
+                                canvas.rotate(time * 50f + i, x, y)
+                                rect.set(x, y, x + objSize, y + objSize)
+                                canvas.drawRect(rect, paint)
+                                canvas.restore()
+                            }
+                        }
+
+                        frames++
+                        val now = System.currentTimeMillis()
+                        if (now - lastTime >= 1000) {
+                            onFpsUpdate(frames)
+                            frames = 0
+                            lastTime = now
+                        }
+                    } finally {
+                        holder.unlockCanvasAndPost(canvas)
+                    }
+                }
             }
         }
+        renderThread?.start()
+    }
 
-        invalidate()
+    override fun surfaceChanged(holder: SurfaceHolder, format: Int, width: Int, height: Int) {}
+
+    override fun surfaceDestroyed(holder: SurfaceHolder) {
+        isRunning = false
+        renderThread?.join()
     }
 }
 
 // --- OpenGL ES 2.0 РЕНДЕР И ЛОГИКА ---
-class MyGLRenderer(private val getParams: () -> Pair<Pair<Float, Float>, Float>) : GLSurfaceView.Renderer {
+class MyGLRenderer(
+    private val getParams: () -> RenderParams,
+    private val onFpsUpdate: (Int) -> Unit
+) : GLSurfaceView.Renderer {
+
     private val vPMatrix = FloatArray(16)
     private val projectionMatrix = FloatArray(16)
     private val viewMatrix = FloatArray(16)
-    private val rotationMatrix = FloatArray(16)
+    private val modelMatrix = FloatArray(16)
     private val scratch = FloatArray(16)
+
     private lateinit var cube: Cube
-    private lateinit var shadowPlane: ShadowPlane
+
+    private val maxCubes = 50000
+    private val positionsX = FloatArray(maxCubes)
+    private val positionsY = FloatArray(maxCubes)
+    private val positionsZ = FloatArray(maxCubes)
+    private val rotAxesX = FloatArray(maxCubes)
+    private val rotAxesY = FloatArray(maxCubes)
+    private val rotAxesZ = FloatArray(maxCubes)
+    private val rotSpeeds = FloatArray(maxCubes)
+    private var globalTime = 0f
+
+    private var frames = 0
+    private var lastTime = System.currentTimeMillis()
 
     override fun onSurfaceCreated(unused: GL10, config: EGLConfig) {
-        GLES20.glClearColor(0.2f, 0.2f, 0.2f, 1.0f)
+        GLES20.glClearColor(0.1f, 0.1f, 0.15f, 1.0f)
         GLES20.glEnable(GLES20.GL_DEPTH_TEST)
         GLES20.glEnable(GLES20.GL_CULL_FACE)
         cube = Cube()
-        shadowPlane = ShadowPlane()
+
+        for (i in 0 until maxCubes) {
+            positionsX[i] = (Random.nextFloat() - 0.5f) * 80f
+            positionsY[i] = (Random.nextFloat() - 0.5f) * 80f
+            positionsZ[i] = (Random.nextFloat() - 0.5f) * 80f
+            rotAxesX[i] = Random.nextFloat()
+            rotAxesY[i] = Random.nextFloat()
+            rotAxesZ[i] = Random.nextFloat()
+            rotSpeeds[i] = Random.nextFloat() * 5f + 1f
+        }
     }
 
     override fun onDrawFrame(unused: GL10) {
+        globalTime += 1f
         GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
-        Matrix.setLookAtM(viewMatrix, 0, 0f, 2f, 6f, 0f, 0f, 0f, 0f, 1.0f, 0.0f)
-        Matrix.multiplyMM(vPMatrix, 0, projectionMatrix, 0, viewMatrix, 0)
 
         val params = getParams()
-        val rotX = params.first.first
-        val rotY = params.first.second
-        val hue = params.second
 
-        shadowPlane.draw(vPMatrix)
-        Matrix.setIdentityM(rotationMatrix, 0)
-        Matrix.rotateM(rotationMatrix, 0, rotX, 1f, 0f, 0f)
-        Matrix.rotateM(rotationMatrix, 0, rotY, 0f, 1f, 0f)
-        Matrix.multiplyMM(scratch, 0, vPMatrix, 0, rotationMatrix, 0)
+        val loadNorm = params.load / 100f
+        val curvedLoad = loadNorm * loadNorm * loadNorm
+        val currentCubes = (curvedLoad * maxCubes).toInt().coerceAtLeast(1)
 
-        val color = Color.HSVToColor(floatArrayOf(hue, 1f, 1f))
+        Matrix.setLookAtM(viewMatrix, 0, 0f, 0f, 50f, 0f, 0f, 0f, 0f, 1.0f, 0.0f)
+        Matrix.rotateM(viewMatrix, 0, params.rotX, 1f, 0f, 0f)
+        Matrix.rotateM(viewMatrix, 0, params.rotY, 0f, 1f, 0f)
+        Matrix.multiplyMM(vPMatrix, 0, projectionMatrix, 0, viewMatrix, 0)
+
+        val color = Color.HSVToColor(floatArrayOf(params.hue, 1f, 1f))
         val r = Color.red(color) / 255f
         val g = Color.green(color) / 255f
         val b = Color.blue(color) / 255f
+        val colorArray = floatArrayOf(r, g, b, 1.0f)
 
-        cube.draw(scratch, rotationMatrix, floatArrayOf(r, g, b, 1.0f))
+        cube.bind(colorArray)
+
+        for (i in 0 until currentCubes) {
+            Matrix.setIdentityM(modelMatrix, 0)
+            Matrix.rotateM(modelMatrix, 0, globalTime * 0.2f, 0f, 1f, 0f)
+            Matrix.translateM(modelMatrix, 0, positionsX[i], positionsY[i], positionsZ[i])
+            Matrix.rotateM(modelMatrix, 0, globalTime * rotSpeeds[i], rotAxesX[i], rotAxesY[i], rotAxesZ[i])
+            Matrix.multiplyMM(scratch, 0, vPMatrix, 0, modelMatrix, 0)
+
+            cube.drawInstance(scratch, modelMatrix)
+        }
+
+        cube.unbind()
+
+        frames++
+        val now = System.currentTimeMillis()
+        if (now - lastTime >= 1000) {
+            onFpsUpdate(frames)
+            frames = 0
+            lastTime = now
+        }
     }
 
     override fun onSurfaceChanged(unused: GL10, width: Int, height: Int) {
         GLES20.glViewport(0, 0, width, height)
         val ratio: Float = width.toFloat() / height.toFloat()
-        Matrix.frustumM(projectionMatrix, 0, -ratio, ratio, -1f, 1f, 2f, 15f)
+        Matrix.frustumM(projectionMatrix, 0, -ratio, ratio, -1f, 1f, 2f, 200f)
     }
 }
 
@@ -489,8 +755,8 @@ class Cube {
         void main() {
             gl_Position = uMVPMatrix * vPosition;
             vec3 transformedNormal = normalize((uModelMatrix * vec4(vNormal, 0.0)).xyz);
-            vec3 lightDir = normalize(vec3(1.0, 1.5, 2.0));
-            float diff = max(dot(transformedNormal, lightDir), 0.3);
+            vec3 lightDir = normalize(vec3(1.0, 1.0, 1.0));
+            float diff = max(dot(transformedNormal, lightDir), 0.2);
             fColor = vec4(vColor.rgb * diff, vColor.a);
         }
     """.trimIndent()
@@ -499,55 +765,69 @@ class Cube {
         precision mediump float;
         varying vec4 fColor;
         void main() {
-            gl_FragColor = fColor;
+            vec2 uv = gl_FragCoord.xy * 0.01;
+            float heavyMath = 0.0;
+            
+            for(int i = 1; i <= 20; i++) {
+                float fi = float(i);
+                heavyMath += sin(uv.x * fi + uv.y) * cos(uv.y * fi - uv.x);
+            }
+            
+            gl_FragColor = vec4(fColor.rgb * (0.8 + 0.2 * sin(heavyMath)), fColor.a);
         }
     """.trimIndent()
 
     private val vertexBuffer: FloatBuffer
     private val mProgram: Int
+    private var positionHandle: Int = 0
+    private var normalHandle: Int = 0
+    private var colorHandle: Int = 0
+    private var mvpMatrixHandle: Int = 0
+    private var modelMatrixHandle: Int = 0
+    private val stride = 6 * 4
 
     private val cubeCoords = floatArrayOf(
-        -1f, -1f,  1f,   0f, 0f, 1f,
-        1f, -1f,  1f,   0f, 0f, 1f,
-        1f,  1f,  1f,   0f, 0f, 1f,
-        -1f, -1f,  1f,   0f, 0f, 1f,
-        1f,  1f,  1f,   0f, 0f, 1f,
-        -1f,  1f,  1f,   0f, 0f, 1f,
+        -0.5f, -0.5f,  0.5f,   0f, 0f, 1f,
+        0.5f, -0.5f,  0.5f,   0f, 0f, 1f,
+        0.5f,  0.5f,  0.5f,   0f, 0f, 1f,
+        -0.5f, -0.5f,  0.5f,   0f, 0f, 1f,
+        0.5f,  0.5f,  0.5f,   0f, 0f, 1f,
+        -0.5f,  0.5f,  0.5f,   0f, 0f, 1f,
 
-        1f, -1f,  1f,   1f, 0f, 0f,
-        1f, -1f, -1f,   1f, 0f, 0f,
-        1f,  1f, -1f,   1f, 0f, 0f,
-        1f, -1f,  1f,   1f, 0f, 0f,
-        1f,  1f, -1f,   1f, 0f, 0f,
-        1f,  1f,  1f,   1f, 0f, 0f,
+        0.5f, -0.5f,  0.5f,   1f, 0f, 0f,
+        0.5f, -0.5f, -0.5f,   1f, 0f, 0f,
+        0.5f,  0.5f, -0.5f,   1f, 0f, 0f,
+        0.5f, -0.5f,  0.5f,   1f, 0f, 0f,
+        0.5f,  0.5f, -0.5f,   1f, 0f, 0f,
+        0.5f,  0.5f,  0.5f,   1f, 0f, 0f,
 
-        1f, -1f, -1f,   0f, 0f, -1f,
-        -1f, -1f, -1f,   0f, 0f, -1f,
-        -1f,  1f, -1f,   0f, 0f, -1f,
-        1f, -1f, -1f,   0f, 0f, -1f,
-        -1f,  1f, -1f,   0f, 0f, -1f,
-        1f,  1f, -1f,   0f, 0f, -1f,
+        0.5f, -0.5f, -0.5f,   0f, 0f, -1f,
+        -0.5f, -0.5f, -0.5f,   0f, 0f, -1f,
+        -0.5f,  0.5f, -0.5f,   0f, 0f, -1f,
+        0.5f, -0.5f, -0.5f,   0f, 0f, -1f,
+        -0.5f,  0.5f, -0.5f,   0f, 0f, -1f,
+        0.5f,  0.5f, -0.5f,   0f, 0f, -1f,
 
-        -1f, -1f, -1f,  -1f, 0f, 0f,
-        -1f, -1f,  1f,  -1f, 0f, 0f,
-        -1f,  1f,  1f,  -1f, 0f, 0f,
-        -1f, -1f, -1f,  -1f, 0f, 0f,
-        -1f,  1f,  1f,  -1f, 0f, 0f,
-        -1f,  1f, -1f,  -1f, 0f, 0f,
+        -0.5f, -0.5f, -0.5f,  -1f, 0f, 0f,
+        -0.5f, -0.5f,  0.5f,  -1f, 0f, 0f,
+        -0.5f,  0.5f,  0.5f,  -1f, 0f, 0f,
+        -0.5f, -0.5f, -0.5f,  -1f, 0f, 0f,
+        -0.5f,  0.5f,  0.5f,  -1f, 0f, 0f,
+        -0.5f,  0.5f, -0.5f,  -1f, 0f, 0f,
 
-        -1f,  1f,  1f,   0f, 1f, 0f,
-        1f,  1f,  1f,   0f, 1f, 0f,
-        1f,  1f, -1f,   0f, 1f, 0f,
-        -1f,  1f,  1f,   0f, 1f, 0f,
-        1f,  1f, -1f,   0f, 1f, 0f,
-        -1f,  1f, -1f,   0f, 1f, 0f,
+        -0.5f,  0.5f,  0.5f,   0f, 1f, 0f,
+        0.5f,  0.5f,  0.5f,   0f, 1f, 0f,
+        0.5f,  0.5f, -0.5f,   0f, 1f, 0f,
+        -0.5f,  0.5f,  0.5f,   0f, 1f, 0f,
+        0.5f,  0.5f, -0.5f,   0f, 1f, 0f,
+        -0.5f,  0.5f, -0.5f,   0f, 1f, 0f,
 
-        -1f, -1f, -1f,   0f, -1f, 0f,
-        1f, -1f, -1f,   0f, -1f, 0f,
-        1f, -1f,  1f,   0f, -1f, 0f,
-        -1f, -1f, -1f,   0f, -1f, 0f,
-        1f, -1f,  1f,   0f, -1f, 0f,
-        -1f, -1f,  1f,   0f, -1f, 0f
+        -0.5f, -0.5f, -0.5f,   0f, -1f, 0f,
+        0.5f, -0.5f, -0.5f,   0f, -1f, 0f,
+        0.5f, -0.5f,  0.5f,   0f, -1f, 0f,
+        -0.5f, -0.5f, -0.5f,   0f, -1f, 0f,
+        0.5f, -0.5f,  0.5f,   0f, -1f, 0f,
+        -0.5f, -0.5f,  0.5f,   0f, -1f, 0f
     )
 
     init {
@@ -558,15 +838,16 @@ class Cube {
             GLES20.glAttachShader(it, ShaderHelper.loadShader(GLES20.GL_FRAGMENT_SHADER, fragmentShaderCode))
             GLES20.glLinkProgram(it)
         }
+
+        positionHandle = GLES20.glGetAttribLocation(mProgram, "vPosition")
+        normalHandle = GLES20.glGetAttribLocation(mProgram, "vNormal")
+        colorHandle = GLES20.glGetUniformLocation(mProgram, "vColor")
+        mvpMatrixHandle = GLES20.glGetUniformLocation(mProgram, "uMVPMatrix")
+        modelMatrixHandle = GLES20.glGetUniformLocation(mProgram, "uModelMatrix")
     }
 
-    fun draw(mvpMatrix: FloatArray, modelMatrix: FloatArray, color: FloatArray) {
+    fun bind(color: FloatArray) {
         GLES20.glUseProgram(mProgram)
-
-        val positionHandle = GLES20.glGetAttribLocation(mProgram, "vPosition")
-        val normalHandle = GLES20.glGetAttribLocation(mProgram, "vNormal")
-
-        val stride = 6 * 4
 
         vertexBuffer.position(0)
         GLES20.glEnableVertexAttribArray(positionHandle)
@@ -576,44 +857,17 @@ class Cube {
         GLES20.glEnableVertexAttribArray(normalHandle)
         GLES20.glVertexAttribPointer(normalHandle, 3, GLES20.GL_FLOAT, false, stride, vertexBuffer)
 
-        GLES20.glUniform4fv(GLES20.glGetUniformLocation(mProgram, "vColor"), 1, color, 0)
-        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(mProgram, "uMVPMatrix"), 1, false, mvpMatrix, 0)
-        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(mProgram, "uModelMatrix"), 1, false, modelMatrix, 0)
+        GLES20.glUniform4fv(colorHandle, 1, color, 0)
+    }
 
+    fun drawInstance(mvpMatrix: FloatArray, modelMatrix: FloatArray) {
+        GLES20.glUniformMatrix4fv(mvpMatrixHandle, 1, false, mvpMatrix, 0)
+        GLES20.glUniformMatrix4fv(modelMatrixHandle, 1, false, modelMatrix, 0)
         GLES20.glDrawArrays(GLES20.GL_TRIANGLES, 0, 36)
+    }
 
+    fun unbind() {
         GLES20.glDisableVertexAttribArray(positionHandle)
         GLES20.glDisableVertexAttribArray(normalHandle)
-    }
-}
-
-class ShadowPlane {
-    private val vertexShaderCode = "uniform mat4 uMVPMatrix; attribute vec4 vPosition; void main() { gl_Position = uMVPMatrix * vPosition; }"
-    private val fragmentShaderCode = "precision mediump float; void main() { gl_FragColor = vec4(0.1, 0.1, 0.1, 0.5); }"
-    private val vertexBuffer: FloatBuffer
-    private val mProgram: Int
-    private val coords = floatArrayOf(-2.5f, -1.5f, -2.5f,  2.5f, -1.5f, -2.5f,  2.5f, -1.5f, 2.5f,  -2.5f, -1.5f, 2.5f)
-
-    init {
-        val bb = ByteBuffer.allocateDirect(coords.size * 4).apply { order(ByteOrder.nativeOrder()) }
-        vertexBuffer = bb.asFloatBuffer().apply { put(coords); position(0) }
-        mProgram = GLES20.glCreateProgram().also {
-            GLES20.glAttachShader(it, ShaderHelper.loadShader(GLES20.GL_VERTEX_SHADER, vertexShaderCode))
-            GLES20.glAttachShader(it, ShaderHelper.loadShader(GLES20.GL_FRAGMENT_SHADER, fragmentShaderCode))
-            GLES20.glLinkProgram(it)
-        }
-    }
-
-    fun draw(mvpMatrix: FloatArray) {
-        GLES20.glEnable(GLES20.GL_BLEND)
-        GLES20.glBlendFunc(GLES20.GL_SRC_ALPHA, GLES20.GL_ONE_MINUS_SRC_ALPHA)
-        GLES20.glUseProgram(mProgram)
-        val positionHandle = GLES20.glGetAttribLocation(mProgram, "vPosition")
-        GLES20.glEnableVertexAttribArray(positionHandle)
-        GLES20.glVertexAttribPointer(positionHandle, 3, GLES20.GL_FLOAT, false, 0, vertexBuffer)
-        GLES20.glUniformMatrix4fv(GLES20.glGetUniformLocation(mProgram, "uMVPMatrix"), 1, false, mvpMatrix, 0)
-        GLES20.glDrawArrays(GLES20.GL_TRIANGLE_FAN, 0, 4)
-        GLES20.glDisableVertexAttribArray(positionHandle)
-        GLES20.glDisable(GLES20.GL_BLEND)
     }
 }
