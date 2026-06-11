@@ -5,10 +5,12 @@ import android.annotation.TargetApi
 import android.app.Activity
 import android.app.ActivityManager
 import android.content.Context
+import android.content.Intent
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
+import android.net.Uri
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.Matrix
@@ -30,11 +32,11 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
 import java.util.Locale
+import javax.microedition.khronos.egl.EGLConfig
+import javax.microedition.khronos.opengles.GL10
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.random.Random
-import javax.microedition.khronos.egl.EGLConfig
-import javax.microedition.khronos.opengles.GL10
 
 // --- ЛОКАЛИЗАЦИЯ ---
 object Loc {
@@ -59,6 +61,13 @@ object Loc {
     val test2dHeavy get() = if (isRu) "ЭКСТРИМ ТЕСТ" else "EXTREME TEST"
     val test3d get() = if (isRu) "OPENGL ES 2.0" else "OPENGL ES 2.0"
 
+    val startTest get() = if (isRu) "НАЧАТЬ ТЕСТ!" else "START TEST!"
+    val stopTest get() = if (isRu) "ОСТАНОВИТЬ ТЕСТ" else "STOP TEST"
+    val autoStage get() = if (isRu) "АВТО-ТЕСТ: ЭТАП " else "AUTO-TEST: STAGE "
+    val rainbow get() = if (isRu) "Радужные кубы" else "Rainbow Cubes"
+    val resultTitle get() = if (isRu) "РЕЗУЛЬТАТЫ ТЕСТА" else "TEST RESULTS"
+    val score get() = if (isRu) "Итоговый балл:" else "Final Score:"
+
     val load2d get() = if (isRu) "Нагрузка 2D: " else "2D Load: "
     val load3d get() = if (isRu) "Нагрузка 3D (Кубы): " else "3D Load (Cubes): "
     val color3d get() = if (isRu) "Цвет 3D кубов" else "3D Cubes Color"
@@ -68,7 +77,7 @@ object Loc {
 }
 
 // --- СОСТОЯНИЯ ЭКРАНОВ ---
-enum class AppScreen { MAIN, TEST_2D_LIGHT, TEST_2D_HEAVY, TEST_3D_GL }
+enum class AppScreen { MAIN, TEST_2D_LIGHT, TEST_2D_HEAVY, TEST_3D_GL, RESULT }
 
 data class RenderParams(val rotX: Float, val rotY: Float, val hue: Float, val load: Float)
 
@@ -89,9 +98,21 @@ class MainActivity : Activity() {
 
     private var cachedGpuModel: String? = null
 
+    // --- ПЕРЕМЕННЫЕ АВТО-ТЕСТА ---
+    private var isAutoTest = false
+    private var autoStage = 0
+    private var currentAutoLoad = 1f
+    private var totalScore = 0
+    private var active2DView: Test2DSurfaceView? = null
+    private var isRainbow3D = false
+    private var lowFpsSeconds = 0
+
+    private var autoLoadText: TextView? = null
+    private var autoProgressBar: ProgressBar? = null
+
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
-            if (currentScreen == AppScreen.MAIN) {
+            if (currentScreen == AppScreen.MAIN || currentScreen == AppScreen.RESULT) {
                 uiFrames++
                 val now = System.currentTimeMillis()
                 if (now - lastUiFpsTime >= 1000) {
@@ -135,7 +156,10 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.BLACK)
             setTextColor(Color.WHITE)
             visibility = View.GONE
-            setOnClickListener { switchScreen(AppScreen.MAIN) }
+            setOnClickListener {
+                isAutoTest = false
+                switchScreen(AppScreen.MAIN)
+            }
         }
 
         overlayLayout.addView(fpsText)
@@ -167,6 +191,52 @@ class MainActivity : Activity() {
             val temp = getCpuTemp()
             tempText.visibility = if (temp > 0f) View.VISIBLE else View.GONE
             tempText.text = "${Loc.cpu}: ${temp}°C"
+
+            if (isAutoTest && currentScreen != AppScreen.MAIN && currentScreen != AppScreen.RESULT) {
+
+                // --- МЕТРИКА ФИЗИЧЕСКОЙ РАБОТЫ (ИДЕАЛЬНЫЙ СЧЕТ) ---
+                val loadNorm = currentAutoLoad / 100f
+                val curvedLoad = loadNorm * loadNorm * loadNorm
+                val maxObjects = when (autoStage) { 1 -> 50000; 2 -> 40000; 3 -> 50000; else -> 10000 }
+                val currentObjects = (curvedLoad * maxObjects).toInt().coerceAtLeast(1)
+
+                // Вычисляем проделанную работу: количество отрендеренных объектов за 1 секунду
+                val workDone = fps * currentObjects
+
+                // Настраиваем веса для каждого этапа, чтобы флагманы получали около 1 млн.
+                val stageMult = when (autoStage) { 1 -> 0.008f; 2 -> 0.025f; 3 -> 0.020f; else -> 0f }
+                val pointsForSecond = (workDone * stageMult).toInt()
+
+                totalScore += pointsForSecond
+                autoProgressBar?.progress = currentAutoLoad.toInt()
+
+                if (fps <= 1) {
+                    lowFpsSeconds++
+                    autoLoadText?.text = "Ожидание: ${5 - lowFpsSeconds}с... | Очки: $totalScore"
+                } else {
+                    lowFpsSeconds = 0
+                    autoLoadText?.text = "Нагрузка: ${currentAutoLoad.toInt()}% | Очки: $totalScore"
+                }
+
+                if ((fps <= 1 && lowFpsSeconds >= 5) || currentAutoLoad >= 100f) {
+                    autoStage++
+                    lowFpsSeconds = 0
+                    if (autoStage > 3) {
+                        isAutoTest = false
+                        switchScreen(AppScreen.RESULT)
+                    } else {
+                        currentAutoLoad = 1f
+                        when (autoStage) {
+                            2 -> switchScreen(AppScreen.TEST_2D_HEAVY)
+                            3 -> switchScreen(AppScreen.TEST_3D_GL)
+                        }
+                    }
+                } else if (fps > 1) {
+                    currentAutoLoad += 5f
+                    if (currentAutoLoad > 100f) currentAutoLoad = 100f
+                    active2DView?.setLoad(currentAutoLoad)
+                }
+            }
         }
     }
 
@@ -189,6 +259,7 @@ class MainActivity : Activity() {
 
     private fun handleBackAction() {
         if (currentScreen != AppScreen.MAIN) {
+            isAutoTest = false
             switchScreen(AppScreen.MAIN)
         } else {
             if (System.currentTimeMillis() - backPressedTime < 2000) {
@@ -200,10 +271,21 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun startAutoTest() {
+        isAutoTest = true
+        autoStage = 1
+        currentAutoLoad = 1f
+        totalScore = 0
+        lowFpsSeconds = 0
+        isRainbow3D = true
+        switchScreen(AppScreen.TEST_2D_LIGHT)
+    }
+
     private fun switchScreen(screen: AppScreen) {
         currentScreen = screen
         contentLayout.removeAllViews()
         backButton.visibility = if (screen == AppScreen.MAIN) View.GONE else View.VISIBLE
+        active2DView = null
 
         when (screen) {
             AppScreen.MAIN -> {
@@ -214,9 +296,11 @@ class MainActivity : Activity() {
             AppScreen.TEST_2D_LIGHT -> show2DTest(isHeavy = false)
             AppScreen.TEST_2D_HEAVY -> show2DTest(isHeavy = true)
             AppScreen.TEST_3D_GL -> show3DGLTest()
+            AppScreen.RESULT -> showResultScreen()
         }
     }
 
+    // --- УТИЛИТЫ СИСТЕМЫ ---
     private fun getDeviceRam(): String {
         val actManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
         val memInfo = ActivityManager.MemoryInfo()
@@ -296,7 +380,6 @@ class MainActivity : Activity() {
         }
     }
 
-    // Универсальный метод поиска частоты GPU (Adreno & Mali)
     private fun getGpuFrequency(): String {
         try {
             val paths = listOf(
@@ -347,8 +430,15 @@ class MainActivity : Activity() {
         }
     }
 
+    // --- ЭКРАНЫ ---
     private fun showMainMenu() {
-        val menuLayout = LinearLayout(this).apply {
+        val menuLayout = ScrollView(this).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+            isFillViewport = true
+        }
+
+        val innerLayout = LinearLayout(this).apply {
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(32, 32, 32, 32)
@@ -365,9 +455,9 @@ class MainActivity : Activity() {
         infoCard.addView(TextView(this).apply { text = "${Loc.freq}${getCpuFrequency()}"; setTextColor(Color.WHITE); textSize = 16f })
         infoCard.addView(TextView(this).apply { text = "${Loc.gpuFreq}${getGpuFrequency()}"; setTextColor(Color.WHITE); textSize = 16f })
         infoCard.addView(TextView(this).apply { text = "${Loc.ram}${getDeviceRam()}"; setTextColor(Color.WHITE); textSize = 16f })
-        menuLayout.addView(infoCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 64 })
+        innerLayout.addView(infoCard, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 64 })
 
-        menuLayout.addView(TextView(this).apply {
+        innerLayout.addView(TextView(this).apply {
             text = Loc.cat2d
             setTextColor(Color.LTGRAY)
             textSize = 14f
@@ -382,20 +472,19 @@ class MainActivity : Activity() {
             text = Loc.test2dLight
             setBackgroundColor("#42A5F5".toColorInt())
             setTextColor(Color.WHITE)
-            setOnClickListener { switchScreen(AppScreen.TEST_2D_LIGHT) }
+            setOnClickListener { isAutoTest = false; switchScreen(AppScreen.TEST_2D_LIGHT) }
         }
         val btn2DHeavy = Button(this).apply {
             text = Loc.test2dHeavy
             setBackgroundColor("#EF5350".toColorInt())
             setTextColor(Color.WHITE)
-            setOnClickListener { switchScreen(AppScreen.TEST_2D_HEAVY) }
+            setOnClickListener { isAutoTest = false; switchScreen(AppScreen.TEST_2D_HEAVY) }
         }
-
         row2D.addView(btn2DLight, LinearLayout.LayoutParams(0, 150, 1f).apply { rightMargin = 8 })
         row2D.addView(btn2DHeavy, LinearLayout.LayoutParams(0, 150, 1f).apply { leftMargin = 8 })
-        menuLayout.addView(row2D, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 48 })
+        innerLayout.addView(row2D, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = 48 })
 
-        menuLayout.addView(TextView(this).apply {
+        innerLayout.addView(TextView(this).apply {
             text = Loc.cat3d
             setTextColor(Color.LTGRAY)
             textSize = 14f
@@ -406,22 +495,109 @@ class MainActivity : Activity() {
             text = Loc.test3d
             setBackgroundColor("#66BB6A".toColorInt())
             setTextColor(Color.WHITE)
-            setOnClickListener { switchScreen(AppScreen.TEST_3D_GL) }
+            setOnClickListener { isAutoTest = false; switchScreen(AppScreen.TEST_3D_GL) }
         }
-        menuLayout.addView(btn3D, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 150))
+        innerLayout.addView(btn3D, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 150).apply { bottomMargin = 64 })
 
-        contentLayout.addView(menuLayout, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        val btnAutoTest = Button(this).apply {
+            text = Loc.startTest
+            setBackgroundColor(Color.parseColor("#FFD54F"))
+            setTextColor(Color.BLACK)
+            textSize = 18f
+            setPadding(0, 32, 0, 32)
+            setOnClickListener { startAutoTest() }
+        }
+        innerLayout.addView(btnAutoTest, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val tgLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(0, 64, 0, 0)
+            setOnClickListener {
+                try {
+                    val intent = Intent(Intent.ACTION_VIEW, Uri.parse("https://t.me/vm2_studios"))
+                    startActivity(intent)
+                } catch (e: Exception) {
+                    Toast.makeText(this@MainActivity, "Ошибка открытия ссылки", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+
+        val tgIcon = ImageView(this).apply {
+            val resId = resources.getIdentifier("tg_icon", "drawable", packageName)
+            if (resId != 0) {
+                setImageResource(resId)
+            }
+            val iconSize = (28 * resources.displayMetrics.density).toInt()
+            layoutParams = LinearLayout.LayoutParams(iconSize, iconSize)
+        }
+
+        val tgText = TextView(this).apply {
+            text = "vm2_studios"
+            setTextColor(Color.parseColor("#2CA5E0"))
+            textSize = 16f
+            setPadding(16, 0, 0, 0)
+        }
+
+        tgLayout.addView(tgIcon)
+        tgLayout.addView(tgText)
+        innerLayout.addView(tgLayout)
+
+        menuLayout.addView(innerLayout)
+        contentLayout.addView(menuLayout)
+    }
+
+    private fun showResultScreen() {
+        val resultLayout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(32, 32, 32, 32)
+        }
+
+        resultLayout.addView(TextView(this).apply {
+            text = Loc.resultTitle
+            setTextColor(Color.WHITE)
+            textSize = 24f
+            gravity = Gravity.CENTER
+        })
+
+        resultLayout.addView(TextView(this).apply {
+            text = Loc.score
+            setTextColor(Color.LTGRAY)
+            textSize = 18f
+            gravity = Gravity.CENTER
+            setPadding(0, 32, 0, 0)
+        })
+
+        resultLayout.addView(TextView(this).apply {
+            text = String.format(Locale.US, "%,d", totalScore)
+            setTextColor(Color.parseColor("#FFD54F"))
+            textSize = 48f
+            gravity = Gravity.CENTER
+            setPadding(0, 16, 0, 64)
+        })
+
+        val btnMenu = Button(this).apply {
+            text = Loc.back
+            setBackgroundColor(Color.BLACK)
+            setTextColor(Color.WHITE)
+            setOnClickListener { switchScreen(AppScreen.MAIN) }
+        }
+        resultLayout.addView(btnMenu, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 150))
+
+        contentLayout.addView(resultLayout, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
     }
 
     private fun show2DTest(isHeavy: Boolean) {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
-        var loadPercent = 1f
+        var loadPercent = if (isAutoTest) 1f else 1f
         val testView = Test2DSurfaceView(this, isHeavy) { realFps ->
             updateFpsDisplay(realFps)
         }.apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
+        active2DView = testView
 
         val controlPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -429,23 +605,40 @@ class MainActivity : Activity() {
             setPadding(32, 32, 32, 32)
         }
 
-        val loadText = TextView(this).apply { text = "${Loc.load2d}${loadPercent.toInt()}%"; setTextColor(Color.WHITE) }
-        val seekBar = SeekBar(this).apply {
-            max = 99
-            progress = 0
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    loadPercent = progress + 1f
-                    loadText.text = "${Loc.load2d}${loadPercent.toInt()}%"
-                    testView.setLoad(loadPercent)
-                }
-                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-            })
+        if (isAutoTest) {
+            controlPanel.addView(TextView(this).apply { text = "${Loc.autoStage}$autoStage / 3"; setTextColor(Color.parseColor("#FFD54F")); textSize = 18f })
+            autoLoadText = TextView(this).apply { text = "Нагрузка: 1% | Очки: $totalScore"; setTextColor(Color.WHITE); setPadding(0, 16, 0, 8) }
+            autoProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; progress = 1 }
+
+            controlPanel.addView(autoLoadText)
+            controlPanel.addView(autoProgressBar)
+
+            val btnStop = Button(this).apply {
+                text = Loc.stopTest
+                setBackgroundColor(Color.parseColor("#EF5350"))
+                setTextColor(Color.WHITE)
+                setOnClickListener { isAutoTest = false; switchScreen(AppScreen.MAIN) }
+            }
+            controlPanel.addView(btnStop, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 150).apply { topMargin = 16 })
+        } else {
+            val loadText = TextView(this).apply { text = "${Loc.load2d}${loadPercent.toInt()}%"; setTextColor(Color.WHITE) }
+            val seekBar = SeekBar(this).apply {
+                max = 99
+                progress = 0
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                        loadPercent = progress + 1f
+                        loadText.text = "${Loc.load2d}${loadPercent.toInt()}%"
+                        testView.setLoad(loadPercent)
+                    }
+                    override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                    override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+                })
+            }
+            controlPanel.addView(loadText)
+            controlPanel.addView(seekBar)
         }
 
-        controlPanel.addView(loadText)
-        controlPanel.addView(seekBar)
         container.addView(testView)
         container.addView(controlPanel)
         contentLayout.addView(container)
@@ -454,7 +647,7 @@ class MainActivity : Activity() {
     private fun show3DGLTest() {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         var colorHue = 0f
-        var loadPercent = 1f
+        var loadPercent = if (isAutoTest) 1f else 1f
         var rotX = 0f
         var rotY = 0f
         var lastTouchX = 0f
@@ -462,7 +655,11 @@ class MainActivity : Activity() {
 
         val glView = GLSurfaceView(this).apply {
             setEGLContextClientVersion(2)
-            setRenderer(MyGLRenderer({ RenderParams(rotX, rotY, colorHue, loadPercent) }) { realFps ->
+            setRenderer(MyGLRenderer({
+                val finalLoad = if (isAutoTest) currentAutoLoad else loadPercent
+                val finalHue = if (isRainbow3D) ((System.currentTimeMillis() / 15) % 360).toFloat() else colorHue
+                RenderParams(rotX, rotY, finalHue, finalLoad)
+            }) { realFps ->
                 updateFpsDisplay(realFps)
             })
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
@@ -493,37 +690,64 @@ class MainActivity : Activity() {
             setPadding(32, 32, 32, 32)
         }
 
-        val colorText = TextView(this).apply { text = Loc.color3d; setTextColor(Color.WHITE) }
-        val colorSeekBar = SeekBar(this).apply {
-            max = 360
-            progress = 0
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    colorHue = progress.toFloat()
-                }
-                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-            })
-        }
+        if (isAutoTest) {
+            controlPanel.addView(TextView(this).apply { text = "${Loc.autoStage}$autoStage / 3"; setTextColor(Color.parseColor("#FFD54F")); textSize = 18f })
+            autoLoadText = TextView(this).apply { text = "Нагрузка: 1% | Очки: $totalScore"; setTextColor(Color.WHITE); setPadding(0, 16, 0, 8) }
+            autoProgressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply { max = 100; progress = 1 }
 
-        val loadText = TextView(this).apply { text = "${Loc.load3d}${loadPercent.toInt()}%"; setTextColor(Color.WHITE); setPadding(0, 16, 0, 0) }
-        val loadSeekBar = SeekBar(this).apply {
-            max = 99
-            progress = 0
-            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                    loadPercent = progress + 1f
-                    loadText.text = "${Loc.load3d}${loadPercent.toInt()}%"
-                }
-                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-                override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-            })
-        }
+            controlPanel.addView(autoLoadText)
+            controlPanel.addView(autoProgressBar)
 
-        controlPanel.addView(colorText)
-        controlPanel.addView(colorSeekBar)
-        controlPanel.addView(loadText)
-        controlPanel.addView(loadSeekBar)
+            val btnStop = Button(this).apply {
+                text = Loc.stopTest
+                setBackgroundColor(Color.parseColor("#EF5350"))
+                setTextColor(Color.WHITE)
+                setOnClickListener { isAutoTest = false; switchScreen(AppScreen.MAIN) }
+            }
+            controlPanel.addView(btnStop, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 150).apply { topMargin = 16 })
+        } else {
+            isRainbow3D = false
+
+            val rainbowCheck = CheckBox(this).apply {
+                text = Loc.rainbow
+                setTextColor(Color.WHITE)
+                setOnCheckedChangeListener { _, isChecked -> isRainbow3D = isChecked }
+            }
+
+            val colorText = TextView(this).apply { text = Loc.color3d; setTextColor(Color.WHITE); setPadding(0, 16, 0, 0) }
+            val colorSeekBar = SeekBar(this).apply {
+                max = 360
+                progress = 0
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                        colorHue = progress.toFloat()
+                        if (isRainbow3D) { rainbowCheck.isChecked = false }
+                    }
+                    override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                    override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+                })
+            }
+
+            val loadText = TextView(this).apply { text = "${Loc.load3d}${loadPercent.toInt()}%"; setTextColor(Color.WHITE); setPadding(0, 16, 0, 0) }
+            val loadSeekBar = SeekBar(this).apply {
+                max = 99
+                progress = 0
+                setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                    override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                        loadPercent = progress + 1f
+                        loadText.text = "${Loc.load3d}${loadPercent.toInt()}%"
+                    }
+                    override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+                    override fun onStopTrackingTouch(seekBar: SeekBar?) {}
+                })
+            }
+
+            controlPanel.addView(rainbowCheck)
+            controlPanel.addView(colorText)
+            controlPanel.addView(colorSeekBar)
+            controlPanel.addView(loadText)
+            controlPanel.addView(loadSeekBar)
+        }
 
         container.addView(glView)
         container.addView(controlPanel)
