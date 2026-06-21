@@ -98,29 +98,44 @@ class MainActivity : Activity() {
 
     private var cachedGpuModel: String? = null
 
-    // --- ПЕРЕМЕННЫЕ АВТО-ТЕСТА ---
+    // --- ПЕРЕМЕННЫЕ АВТО-ТЕСТА И ПОТОКОВ ---
     private var isAutoTest = false
     private var autoStage = 0
     private var currentAutoLoad = 1f
     private var totalScore = 0
-    private var active2DView: Test2DSurfaceView? = null
-    private var isRainbow3D = false
+
+    @Volatile private var lastRenderTime = 0L
+    @Volatile private var lastReportedFps = 0
+    private var lastAutoTickTime = 0L
     private var lowFpsSeconds = 0
+
+    private var active2DView: Test2DSurfaceView? = null
+    private var active3DView: GLSurfaceView? = null
+    private var isRainbow3D = false
 
     private var autoLoadText: TextView? = null
     private var autoProgressBar: ProgressBar? = null
 
     private val frameCallback = object : Choreographer.FrameCallback {
         override fun doFrame(frameTimeNanos: Long) {
+            val now = System.currentTimeMillis()
+
             if (currentScreen == AppScreen.MAIN || currentScreen == AppScreen.RESULT) {
                 uiFrames++
-                val now = System.currentTimeMillis()
                 if (now - lastUiFpsTime >= 1000) {
-                    updateFpsDisplay(uiFrames)
+                    updateMainFpsDisplay(uiFrames)
                     uiFrames = 0
                     lastUiFpsTime = now
                 }
             }
+
+            if (isAutoTest && currentScreen != AppScreen.MAIN && currentScreen != AppScreen.RESULT) {
+                if (now - lastAutoTickTime >= 1000) {
+                    processAutoTestTick(now)
+                    lastAutoTickTime = now
+                }
+            }
+
             Choreographer.getInstance().postFrameCallback(this)
         }
     }
@@ -173,6 +188,7 @@ class MainActivity : Activity() {
         switchScreen(AppScreen.MAIN)
 
         lastUiFpsTime = System.currentTimeMillis()
+        lastAutoTickTime = System.currentTimeMillis()
         Choreographer.getInstance().postFrameCallback(frameCallback)
 
         if (Build.VERSION.SDK_INT >= 33) {
@@ -185,58 +201,66 @@ class MainActivity : Activity() {
         Choreographer.getInstance().removeFrameCallback(frameCallback)
     }
 
-    fun updateFpsDisplay(fps: Int) {
-        runOnUiThread {
-            fpsText.text = "${Loc.fps}: $fps"
-            val temp = getCpuTemp()
-            tempText.visibility = if (temp > 0f) View.VISIBLE else View.GONE
-            tempText.text = "${Loc.cpu}: ${temp}°C"
+    private fun onFrameRendered(fps: Int?) {
+        lastRenderTime = System.currentTimeMillis()
+        if (fps != null) {
+            lastReportedFps = fps
+            if (!isAutoTest) {
+                runOnUiThread { updateMainFpsDisplay(fps) }
+            }
+        }
+    }
 
-            if (isAutoTest && currentScreen != AppScreen.MAIN && currentScreen != AppScreen.RESULT) {
+    private fun updateMainFpsDisplay(fps: Int) {
+        fpsText.text = "${Loc.fps}: $fps"
+        val temp = getCpuTemp()
+        tempText.visibility = if (temp > 0f) View.VISIBLE else View.GONE
+        tempText.text = "${Loc.cpu}: ${temp}°C"
+    }
 
-                // --- МЕТРИКА ФИЗИЧЕСКОЙ РАБОТЫ (ИДЕАЛЬНЫЙ СЧЕТ) ---
-                val loadNorm = currentAutoLoad / 100f
-                val curvedLoad = loadNorm * loadNorm * loadNorm
-                val maxObjects = when (autoStage) { 1 -> 50000; 2 -> 40000; 3 -> 50000; else -> 10000 }
-                val currentObjects = (curvedLoad * maxObjects).toInt().coerceAtLeast(1)
+    private fun processAutoTestTick(now: Long) {
+        val timeSinceLastRender = now - lastRenderTime
+        val effectiveFps = if (timeSinceLastRender > 1500) 0 else lastReportedFps
 
-                // Вычисляем проделанную работу: количество отрендеренных объектов за 1 секунду
-                val workDone = fps * currentObjects
+        updateMainFpsDisplay(effectiveFps)
 
-                // Настраиваем веса для каждого этапа, чтобы флагманы получали около 1 млн.
-                val stageMult = when (autoStage) { 1 -> 0.008f; 2 -> 0.025f; 3 -> 0.020f; else -> 0f }
-                val pointsForSecond = (workDone * stageMult).toInt()
+        val loadNorm = currentAutoLoad / 100f
+        val curvedLoad = loadNorm * loadNorm * loadNorm
+        val maxObjects = when (autoStage) { 1 -> 50000; 2 -> 40000; 3 -> 50000; else -> 10000 }
+        val currentObjects = (curvedLoad * maxObjects).toInt().coerceAtLeast(1)
 
-                totalScore += pointsForSecond
-                autoProgressBar?.progress = currentAutoLoad.toInt()
+        val workDone = effectiveFps * currentObjects
+        val stageMult = when (autoStage) { 1 -> 0.008f; 2 -> 0.025f; 3 -> 0.020f; else -> 0f }
+        val pointsForSecond = (workDone * stageMult).toInt()
 
-                if (fps <= 1) {
-                    lowFpsSeconds++
-                    autoLoadText?.text = "Ожидание: ${5 - lowFpsSeconds}с... | Очки: $totalScore"
-                } else {
-                    lowFpsSeconds = 0
-                    autoLoadText?.text = "Нагрузка: ${currentAutoLoad.toInt()}% | Очки: $totalScore"
-                }
+        totalScore += pointsForSecond
+        autoProgressBar?.progress = currentAutoLoad.toInt()
 
-                if ((fps <= 1 && lowFpsSeconds >= 5) || currentAutoLoad >= 100f) {
-                    autoStage++
-                    lowFpsSeconds = 0
-                    if (autoStage > 3) {
-                        isAutoTest = false
-                        switchScreen(AppScreen.RESULT)
-                    } else {
-                        currentAutoLoad = 1f
-                        when (autoStage) {
-                            2 -> switchScreen(AppScreen.TEST_2D_HEAVY)
-                            3 -> switchScreen(AppScreen.TEST_3D_GL)
-                        }
-                    }
-                } else if (fps > 1) {
-                    currentAutoLoad += 5f
-                    if (currentAutoLoad > 100f) currentAutoLoad = 100f
-                    active2DView?.setLoad(currentAutoLoad)
+        if (effectiveFps <= 1) {
+            lowFpsSeconds++
+            autoLoadText?.text = "Ожидание: ${5 - lowFpsSeconds}с... | Очки: $totalScore"
+        } else {
+            lowFpsSeconds = 0
+            autoLoadText?.text = "Нагрузка: ${currentAutoLoad.toInt()}% | Очки: $totalScore"
+        }
+
+        if ((effectiveFps <= 1 && lowFpsSeconds >= 5) || currentAutoLoad >= 100f) {
+            autoStage++
+            lowFpsSeconds = 0
+            if (autoStage > 3) {
+                isAutoTest = false
+                switchScreen(AppScreen.RESULT)
+            } else {
+                currentAutoLoad = 1f
+                when (autoStage) {
+                    2 -> switchScreen(AppScreen.TEST_2D_HEAVY)
+                    3 -> switchScreen(AppScreen.TEST_3D_GL)
                 }
             }
+        } else if (effectiveFps > 1) {
+            currentAutoLoad += 5f
+            if (currentAutoLoad > 100f) currentAutoLoad = 100f
+            active2DView?.setLoad(currentAutoLoad)
         }
     }
 
@@ -277,15 +301,23 @@ class MainActivity : Activity() {
         currentAutoLoad = 1f
         totalScore = 0
         lowFpsSeconds = 0
+        lastReportedFps = 60
+        lastRenderTime = System.currentTimeMillis()
+        lastAutoTickTime = System.currentTimeMillis()
         isRainbow3D = true
         switchScreen(AppScreen.TEST_2D_LIGHT)
     }
 
     private fun switchScreen(screen: AppScreen) {
         currentScreen = screen
+
+        active2DView?.stop()
+        active3DView?.onPause()
+
         contentLayout.removeAllViews()
         backButton.visibility = if (screen == AppScreen.MAIN) View.GONE else View.VISIBLE
         active2DView = null
+        active3DView = null
 
         when (screen) {
             AppScreen.MAIN -> {
@@ -438,7 +470,8 @@ class MainActivity : Activity() {
         }
 
         val innerLayout = LinearLayout(this).apply {
-            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.CENTER)
+            // ФИКС РАЗМЕТКИ ДЛЯ СТАРЫХ УСТРОЙСТВ: Используем MATCH_PARENT для высоты
+            layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(32, 32, 32, 32)
@@ -592,8 +625,8 @@ class MainActivity : Activity() {
         val container = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         var loadPercent = if (isAutoTest) 1f else 1f
-        val testView = Test2DSurfaceView(this, isHeavy) { realFps ->
-            updateFpsDisplay(realFps)
+        val testView = Test2DSurfaceView(this, isHeavy) { fps ->
+            onFrameRendered(fps)
         }.apply {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
         }
@@ -659,8 +692,8 @@ class MainActivity : Activity() {
                 val finalLoad = if (isAutoTest) currentAutoLoad else loadPercent
                 val finalHue = if (isRainbow3D) ((System.currentTimeMillis() / 15) % 360).toFloat() else colorHue
                 RenderParams(rotX, rotY, finalHue, finalLoad)
-            }) { realFps ->
-                updateFpsDisplay(realFps)
+            }) { fps ->
+                onFrameRendered(fps)
             })
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f)
@@ -683,6 +716,7 @@ class MainActivity : Activity() {
                 true
             }
         }
+        active3DView = glView
 
         val controlPanel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -755,11 +789,11 @@ class MainActivity : Activity() {
     }
 }
 
-// --- УНИВЕРСАЛЬНЫЙ ДВИЖОК 2D РЕНДЕРА (С НЕЛИНЕЙНОЙ НАГРУЗКОЙ) ---
+// --- УНИВЕРСАЛЬНЫЙ ДВИЖОК 2D РЕНДЕРА ---
 class Test2DSurfaceView(
     context: Context,
     private val isHeavy: Boolean,
-    private val onFpsUpdate: (Int) -> Unit
+    private val onFpsUpdate: (Int?) -> Unit
 ) : SurfaceView(context), SurfaceHolder.Callback {
 
     private var renderThread: Thread? = null
@@ -787,6 +821,10 @@ class Test2DSurfaceView(
         currentLoadPercent = percent
     }
 
+    fun stop() {
+        isRunning = false
+    }
+
     override fun surfaceCreated(holder: SurfaceHolder) {
         isRunning = true
         renderThread = Thread {
@@ -810,6 +848,8 @@ class Test2DSurfaceView(
                         val currentObjects = (curvedLoad * maxObjects).toInt().coerceAtLeast(1)
 
                         for (i in 0 until currentObjects) {
+                            if (!isRunning) break // Защита от долгого зависания при выходе!
+
                             if (isHeavy) {
                                 val x = sin(time + i * 0.001f) * w / 2 + w / 2
                                 val y = cos(time * 0.8f + i * 0.001f) * h / 2 + h / 2
@@ -837,6 +877,8 @@ class Test2DSurfaceView(
                             }
                         }
 
+                        onFpsUpdate(null)
+
                         frames++
                         val now = System.currentTimeMillis()
                         if (now - lastTime >= 1000) {
@@ -845,7 +887,7 @@ class Test2DSurfaceView(
                             lastTime = now
                         }
                     } finally {
-                        holder.unlockCanvasAndPost(canvas)
+                        try { holder.unlockCanvasAndPost(canvas) } catch (e: Exception) {}
                     }
                 }
             }
@@ -857,14 +899,16 @@ class Test2DSurfaceView(
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
         isRunning = false
-        renderThread?.join()
+        try {
+            renderThread?.join(150)
+        } catch (e: Exception) {}
     }
 }
 
 // --- OpenGL ES 2.0 РЕНДЕР И ЛОГИКА ---
 class MyGLRenderer(
     private val getParams: () -> RenderParams,
-    private val onFpsUpdate: (Int) -> Unit
+    private val onFpsUpdate: (Int?) -> Unit
 ) : GLSurfaceView.Renderer {
 
     private val vPMatrix = FloatArray(16)
@@ -939,6 +983,8 @@ class MyGLRenderer(
         }
 
         cube.unbind()
+
+        onFpsUpdate(null)
 
         frames++
         val now = System.currentTimeMillis()
